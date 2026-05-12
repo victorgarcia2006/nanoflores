@@ -1,0 +1,344 @@
+load "lapack";
+verbosity = 1;
+real cpu = clock();
+int seed = 123456789;
+//randinit(100*clock());
+
+/*
+Variable Definitions
+*/
+int npart = 1; //Number of particles
+real boxwd = 20.0; // width of the cell containing the system
+real boxht = 20.0; // height of the cell containing the system
+real xradius = 2.0; // horizontal axis of the particles
+real yradius = (2.0)/(xradius); // vertical axis of the particles
+real xshift = 5.0; // horizontal shift from the center of the cell
+real yshift = 0.0; // vertical shift form the center of the cell
+real a0 = 95.0*pi/180.0; // Convert to radians
+real a1 = 40.0*pi/180.0; // Convert to radians
+real a2 = 10.0*pi/180.0; // Convert to radians
+real aname = a0*180.0/pi;
+real phi = a0*180.0/pi; // angle between easy axis and external applied field
+real npoints = 507.0; //points in half the hysteresis curve
+int mpinput;
+{
+    ifstream inputfile("input.txt");
+    inputfile >> mpinput;
+}
+int mp = mpinput;
+real beta = 3e-6; // constant to enter random variations
+real t=1e-3; // tolerance for the code
+real initialfield = -5.0; // initial field
+real finalfield = 5.0; // final (end) field
+real a = 0.4;
+real b = 6.0;
+real R0 = 1.0;
+
+// real[int] is a vector of "int" elements. Each element is a real
+real[int] mx(npart); //mx is vector storing horizontal magnetization
+real[int] mxpast(npart); // mx in a past state for comparison
+real[int] my(npart); //my is a vector storing vertical magnetization
+real[int] mypast(npart); // my in a past state for comparison
+real[int] V(npart); //V is a vector storing the volume of each particle
+real[int] h(2); // vector storing the external magnetic field
+real[int] Gradmx(npart); // horizontal component of the Grad
+real[int] Gradmy(npart); // vertical component of the Grad
+real Tvolume; // Total volume
+real theta;
+real hi; // auxiliar variable for external field
+real hf; // auxiliar variable for external field
+real dh; // Step to change the external field
+real E0; // Energy in the actual system
+real E1; // Energy in the state with proposed magnetization
+real Ea; // Energy in the state with optimal magnetization for monitoring the energy
+real gnorm; // Norm of the gradient
+real mnorm; // Norm of the magnetization
+real dirx; // Horizontal component of the normalized gradient
+real diry; // Vertical component of the normalized gradient
+real st; // step
+real dE; // Energy difference
+real mtotx; // total horizontal magnetization
+real mtoty; // total vertical magnetization
+real it; // iteration counter
+real flag; // Auxiliar variable that acts as a flag
+matrix A; // Matrix for the variational formulation
+real s1; // Switch for conditionals
+real s2; // Switch for conditionals
+
+
+/*
+Variables computed on the above
+*/
+real xcenter= boxwd/2.0;
+real ycenter= boxht/2.0;
+
+
+/*
+Space under construction
+*/
+
+border b1(t=0.0,boxwd){x=t; y=0.0; label=901;};
+border b2(t=0.0,boxht){x=boxwd; y=t; label=902;};
+border b3(t=0.0,boxwd){x=boxwd-t; y=boxht; label=903;};
+border b4(t=0.0,boxht){x=0.0; y=boxht-t; label=904;};
+
+//border B0(t=0,2*pi){x=10.0 + (a+sin(t))*cos(t)*cos(a0) -b*sin(t); y=10.0+a*cos(t)*sin(a0) +b*sin(t);label=0;};
+//border B1(t=0,2*pi){x= 5.0 + (a+sin(t))*cos(t)*cos(a1) -b*sin(t); y=10.0+a*cos(t)*sin(a1) +b*sin(t);label=1;};
+//border B2(t=0,2*pi){x=15.0 + (a+sin(t))*cos(t)*cos(a2) -b*sin(t); y=10.0+a*cos(t)*sin(a2) +b*sin(t);label=2;};
+
+border B0(t=0, 2*pi){ x= 10.0+(R0*( 1.0 + a*cos(b*t)))*cos(t) ; y =10.0+(R0*( 1.0 + a*cos(b*t)))*sin(t) ;label=0;};
+mesh Th = buildmesh(b1(mp)+b2(mp) +b3(mp) +b4(mp) +B0(-mp) );
+plot(Th, wait=0, ps="malla_A"+string(a)+"B"+string(b)+"R"+string(R0)+"mp"+string(mp)+".eps");
+// Auxiliar mesh to calculate the volume of each partile
+// Make one for every particle in the volume count
+mesh Thaux0 = buildmesh(B0(mp));
+//mesh Thaux1 = buildmesh(B1(mp));
+//mesh Thaux2 = buildmesh(B2(mp));
+
+/*
+Constructing the variational formulation and space functions
+*/
+
+// Uncomment this section for periodic boundary conditions
+/*
+fespace Vh(Th, P1, periodic=[[901,x],[903,x],[902,y],[904,y]]);
+Vh uh, vh, hx, hy, F;
+varf aa(uh,vh)= int2d(Th)( dx(uh)*dx(vh) +dy(uh)*dy(vh) );
+*/
+
+// Uncomment this section for Zero Boundary Conditions
+fespace Vh(Th, P1);
+Vh uh, vh, hx, hy, F; // Functions living in Vh
+varf aa(uh,vh)= int2d(Th)( dx(uh)*dx(vh) +dy(uh)*dy(vh) )
+                +on(901,902,903,904, uh=0);
+
+// add one int1d for each particle in the array
+varf ff(unused, vh)= -int1d(Th,0)( (mx(0)*N.x +my(0)*N.y)*vh )
+                     //-int1d(Th,1)( (mx(1)*N.x +my(1)*N.y)*vh )
+                     //-int1d(Th,2)( (mx(1)*N.x +my(1)*N.y)*vh )
+                      ;
+
+// Initiating magnetization. We also use this cicle to
+// compute the volume of the particles and the total volume
+V(0) = int2d(Thaux0)(1.0);
+//V(1) = int2d(Thaux1)(1.0);
+//V(2) = int2d(Thaux2)(1.0);
+Tvolume = 0.0;
+
+for (int i=0; i<npart; i++){
+    randinit( seed*clock() );
+    theta= randreal2()*45.0*pi/180.0;
+    mx(i)= cos(theta);
+    my(i)= sin(theta);
+    Tvolume= Tvolume +V(i);
+}
+//cout << "M_initial=" << "\t mx=" << mx(0) << "\t my=" << my(0) << "\t m^2=" <<mx(0)^2 + my(0)^2 << endl;
+
+/*
+Filename generator
+*/
+
+string name = "1PA"+string(a)+"B"+string(b)+"R"+string(R0)+"mp"+string(mp);
+ofstream outfile(name+".txt");
+//ofstream outfile("tester"+string(phi*180.0/pi)+".txt");
+//ofstream outfile("tester.txt");
+ofstream efile("Efile.txt");
+
+hi= initialfield;
+hf= finalfield;
+dh = (hf-hi)/npoints;
+while (hi<hf){
+    h= [0.0,hi];
+    flag=0;
+    st=0.5;
+    it=0;
+    cout << "Getting the magnetization for h=" << hi << endl;
+    while (flag==0){
+        s1=0;
+        s2=0;
+        mxpast = mx;
+        mypast = my;
+        // Solving the weak form
+        A = aa(Vh,Vh);
+        F[] = ff(0,Vh);
+        uh[] = A^-1*F[];
+        hx = dx(uh);
+        hy = dy(uh);
+        // Computing energy for actual state
+        E0= 0.5*int2d(Th)( hx*hx +hy*hy ); // Magnetostatic energy term
+        for (int i=0; i<npart; i++){
+        E0= E0 -V(i)*( mx(i)*h[0] +my(i)*h[1] ); // Zeeman energy term
+        }
+        // Computing the Gradient with respect m of each particle
+        for (int i=0; i<npart; i++){
+            Gradmx(i)= -int1d(Th,i)( uh*N.x ) -V(i)*h[0];
+            Gradmy(i)= -int1d(Th,i)( uh*N.y ) -V(i)*h[1];
+            gnorm= sqrt(Gradmx(i)^2.0 +Gradmy(i)^2.0);
+            dirx= Gradmx(i)/gnorm;
+            diry= Gradmy(i)/gnorm;
+            // Moving the magnetization to the posterior state
+            mx(i)= mx(i) -st*dirx +beta*randreal1();
+            my(i)= my(i) -st*diry +beta*randreal1();
+            mnorm= sqrt( mx(i)^2.0 +my(i)^2.0 );
+            mx(i)= mx(i)/mnorm;
+            my(i)= my(i)/mnorm;
+        }
+        //cout << "M_h"<< hi << "=" << mx(0) << "__" << my(0) <<"__" <<mx(0)^2 + my(0)^2 << endl;
+        // Solving the weak form for the posterior state
+        A= aa(Vh,Vh);
+        F[]= ff(0,Vh);
+        uh[]= A^-1*F[];
+        hx= dx(uh); hy= dy(uh);
+        // Computing energy for the posterior state
+        E1= 0.5*int2d(Th)( hx*hx +hy*hy );
+        for (int i=0; i<npart; i++){
+        E1= E1 -V(i)*( mx(i)*h[0] +my(i)*h[1] );
+        }
+        dE= E0 -E1;
+        if (E0 -E1 > 0){
+            //cout << hi << "  OK  " << E0 << "\t" << E1 << "\t" <<
+            //    mx(0) << "\t" << my(0) <<  endl;
+            s1=1.0;
+        }
+        else{
+            //cout << hi << "  Error  " << E0 << "\t" << E1 << "\t" <<
+            //    mx(0) << "\t" << my(0) <<  endl;
+            st= 0.5*st;
+            mx= mxpast;
+            my= mypast;
+        }
+        if (abs(dE) < 1e-8){
+            s1=1.0;
+        }
+        if (abs(dE) < t){
+            s2= 1.0;
+        }
+        //cout << hi << "\t" << s1 << "\t" << dE << "\t" << s2 << endl;
+        cout << "h=" <<hi << "\t E0=" << E0 << endl;
+        if (s1*s2 >= 1){
+            flag=1;
+        }
+    }
+    plot(uh ,value=0, wait=0, fill=1);
+    mtotx=0.0;
+    mtoty=0.0;
+    for (int i=0; i<npart; i++){
+        mtotx= mtotx +mx(i)*V(i)/Tvolume;
+        mtoty= mtoty +my(i)*V(i)/Tvolume;
+    }
+    Ea= 0.5*int2d(Th)( hx*hx +hy*hy );
+    for (int i=0; i<npart; i++){
+    Ea= Ea -V(i)*( mx(i)*h[0] +my(i)*h[1] );
+    }
+    cout << "Energy minimum found for h=" << hi << endl;
+    cout << "M=(" << mtotx << "," << mtoty << ")" << endl;
+    cout << "E=" << Ea << endl;
+    outfile << (h(0))+"\t"+(h(1))+"\t"+mtotx+"\t"+mtoty+"\t"+ Ea << endl;
+    //outfile << (h[0])+"\t"+(h[1])+"\t"+mtotx+"\t"+mtoty+"\t"+mx(0)+"\t"+my(0)+"\t"+mx(1)+"\t"+my(1)+"\t"+mx(2)+"\t"+my(2) << endl;
+    //efile << Ea +"\t" +mx(0) +"\t" +my(0) << endl;
+    it= it+1;
+    hi = hi +dh;
+}
+
+plot(uh ,value=0, wait=0, fill=1, ps=name+".eps");
+
+//-----------------------------------------------------------------------------------------------
+// DOWNWARD CYCLE
+//-----------------------------------------------------------------------------------------------
+
+hi= finalfield;
+hf= initialfield;
+dh= (hf-hi)/npoints;
+//while (hi>hf){
+while (hi>hf){
+    h= [0.0,hi];
+    flag=0;
+    st=0.5;
+    it=0;
+    cout << "Getting the magnetization for h=" << hi << endl;
+    while (flag==0){
+        s1=0;
+        s2=0;
+        mxpast = mx;
+        mypast = my;
+        // Solving the weak form
+        A = aa(Vh,Vh);
+        F[] = ff(0,Vh);
+        uh[] = A^-1*F[];
+        hx = dx(uh);
+        hy = dy(uh);
+        // Computing energy for actual state
+        E0= 0.5*int2d(Th)( hx*hx +hy*hy ); // Magnetostatic energy term
+        for (int i=0; i<npart; i++){
+        E0= E0 -V(i)*( mx(i)*h[0] +my(i)*h[1] ); // Zeeman energy term
+        }
+        // Computing the Gradient with respect m of each particle
+        for (int i=0; i<npart; i++){
+            Gradmx(i)= -int1d(Th,i)( uh*N.x ) -V(i)*h[0];
+            Gradmy(i)= -int1d(Th,i)( uh*N.y ) -V(i)*h[1];
+            gnorm= sqrt(Gradmx(i)^2.0 +Gradmy(i)^2.0);
+            dirx= Gradmx(i)/gnorm;
+            diry= Gradmy(i)/gnorm;
+            // Moving the magnetization to the posterior state
+            mx(i)= mx(i) -st*dirx +beta*randreal1();
+            my(i)= my(i) -st*diry +beta*randreal1();
+            mnorm= sqrt( mx(i)^2.0 +my(i)^2.0 );
+            mx(i)= mx(i)/mnorm;
+            my(i)= my(i)/mnorm;
+        }
+        //cout << "M_h"<< hi << "=" << mx(0) << "__" << my(0) <<"__" <<mx(0)^2 + my(0)^2 << endl;
+        // Solving the weak form for the posterior state
+        A= aa(Vh,Vh);
+        F[]= ff(0,Vh);
+        uh[]= A^-1*F[];
+        hx= dx(uh); hy= dy(uh);
+        // Computing energy for the posterior state
+        E1= 0.5*int2d(Th)( hx*hx +hy*hy );
+        for (int i=0; i<npart; i++){
+        E1= E1 -V(i)*( mx(i)*h[0] +my(i)*h[1] );
+        }
+        dE= E0 -E1;
+        if (E0 -E1 > 0){
+            //cout << hi << "  OK  " << E0 << "\t" << E1 << "\t" <<
+            //    mx(0) << "\t" << my(0) <<  endl;
+            s1=1.0;
+        }
+        else{
+            //cout << hi << "  Error  " << E0 << "\t" << E1 << "\t" <<
+            //    mx(0) << "\t" << my(0) <<  endl;
+            st= 0.5*st;
+            mx= mxpast;
+            my= mypast;
+        }
+        if (abs(dE) < 1e-8){
+            s1=1.0;
+        }
+        if (abs(dE) < t){
+            s2= 1.0;
+        }
+        //cout << hi << "\t" << s1 << "\t" << dE << "\t" << s2 << endl;
+        cout << "h=" <<hi << "\t E0=" << E0 << endl;
+        if (s1*s2 >= 1){
+            flag=1;
+        }
+    }
+    plot(uh ,value=1, wait=0, fill=1);
+    mtotx=0.0;
+    mtoty=0.0;
+    for (int i=0; i<npart; i++){
+        mtotx= mtotx +mx(i)*V(i)/Tvolume;
+        mtoty= mtoty +my(i)*V(i)/Tvolume;
+    }
+    Ea= 0.5*int2d(Th)( hx*hx +hy*hy );
+    for (int i=0; i<npart; i++){
+    Ea= Ea -V(i)*( mx(i)*h[0] +my(i)*h[1] );
+    }
+    cout << "Energy minimum found for h=" << hi << endl;
+    cout << "M=(" << mtotx << "," << mtoty << ")" << endl;
+    cout << "E=" << Ea << endl;
+    outfile << (h(0)) +"\t"+ (h(1)) +"\t"+ mtotx +"\t"+ mtoty +"\t"+ Ea << endl;
+    //outfile << (h[0])+"\t"+(h[1])+"\t"+mtotx+"\t"+mtoty+"\t"+mx(0)+"\t"+my(0)+"\t"+mx(1)+"\t"+my(1)+"\t"+mx(2)+"\t"+my(2) << endl;
+    efile << Ea +"\t" +mx(0) +"\t" +my(0) << endl;
+    it= it+1;
+    hi = hi +dh;
+}
